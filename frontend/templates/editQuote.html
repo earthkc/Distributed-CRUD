@@ -1,0 +1,12 @@
+<!DOCTYPE HTML>
+<html>
+  <body>
+        <h2>Edit/Update Quote</h2>
+        <br/>{{.}}<br/>
+    <form method="post" action="/updateQuote">
+    <input type="hidden" name="id" value={{.}} />
+      <input type="text" name="quote" value={{.}} /> <br/>
+      <input type="submit" value="Update Quote"/>
+    </form>
+  </body>
+  </html>

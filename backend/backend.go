@@ -101,6 +101,15 @@ func raftConsensus() {
 
 }
 
+/*
+func quoteCheck() {
+	for {
+		fmt.Println(len(quotes))
+		time.Sleep(1 * time.Second)
+	}
+}
+*/
+
 func main() {
 
 	// Preliminary hardcoded data
@@ -112,6 +121,8 @@ func main() {
 	quotes = append(quotes, "Go to Heaven for the climate, Hell for the company. - Mark Twain")
 	quotes = append(quotes, "I can resist everything except temptation. - Oscar Wilde")
 	quotes = append(quotes, "A committee is a group that keeps minutes and loses hours. - Milton Berle")
+
+	//go quoteCheck()
 
 	// front end listen flag
 	var portnum int
@@ -132,7 +143,7 @@ func main() {
 		if err != nil {
 			fmt.Println("Error accepting connection")
 		}
-		fmt.Println("Connection accepted.")
+		fmt.Printf("Connection accepted on port %s.\n", port)
 		go connHandler(conn)
 	}
 	//defer conn.Close()

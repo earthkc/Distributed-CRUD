@@ -321,9 +321,16 @@ func main() {
 		mutex.Lock()
 		backendConns = append(backendConns, tempconn)
 		mutex.Unlock()
+
 	}
 
-	go connWatch()
+	// Tells back ends to begin synchronization
+	for _, v := range backendConns {
+		encoder := json.NewEncoder(v)
+		encoder.Encode("INITSYNC")
+	}
+
+	go connWatch() // error testing
 
 	// *****************************
 	// Initializes http Handler functions

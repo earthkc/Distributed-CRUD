@@ -9,8 +9,12 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 )
+
+var backendConns []*net.TCPConn
+var backendConnMutex sync.RWMutex
 
 // Global Slice that Holds the strings of quotes
 var quotes = []string{}
@@ -56,9 +60,11 @@ func updateQuote(id string, newQuote string) {
 }
 
 // Handles each TCP connection
-func connHandler(conn net.Conn) {
+func connHandler(conn net.Conn, backendAddrs []*net.TCPAddr) {
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
+
+	allBackendsConnected := false
 
 	// Reads actions from the front end
 	for {
@@ -67,6 +73,11 @@ func connHandler(conn net.Conn) {
 		switch action {
 		case "PING":
 			encoder.Encode("ACK")
+		case "INITSYNC":
+			if allBackendsConnected == false {
+				allBackendsConnected = true
+				initConnectToBackends(backendAddrs)
+			}
 		case "index":
 			mutex.RLock()
 			encoder.Encode(quotes)
@@ -85,30 +96,43 @@ func connHandler(conn net.Conn) {
 			decoder.Decode(&id)
 			decoder.Decode(&newQuote)
 			updateQuote(id, newQuote)
+
 		}
 	}
 }
 
+// Synconization of backends using the Raft concensus algorithm
 func raftConsensus() {
 	type State int
-	//var quorum int
 	const (
 		Follower  State = 0
 		Candidate State = 1
 		Leader    State = 2
 	)
-	//currState := Follower
+	// log
+	term := 0
+	votes := 0
+	var currentLeader *net.TCPConn
+	quorum := len(backendConns) + 1
+	currentState := Follower
 
 }
 
-/*
-func quoteCheck() {
-	for {
-		fmt.Println(len(quotes))
-		time.Sleep(1 * time.Second)
+// Initial connections to start synchronization between all backends
+func initConnectToBackends(backendAddrs []*net.TCPAddr) {
+	for _, v := range backendAddrs {
+		conn, err := net.DialTCP("tcp", nil, v)
+		if err != nil {
+			fmt.Println("A backend server could not be connected to.")
+			//return
+		}
+		backendConnMutex.Lock()
+		backendConns = append(backendConns, conn)
+		backendConnMutex.Unlock()
 	}
+	go raftConsensus()
+	return
 }
-*/
 
 func main() {
 
@@ -127,9 +151,24 @@ func main() {
 	// front end listen flag
 	var portnum int
 	flag.IntVar(&portnum, "listen", 8090, "front end listening port")
+	// backend tcp flag
+	var backendtcp string
+	flag.StringVar(&backendtcp, "backend", "", "backend TCP port")
 	flag.Parse()
+
+	// converts front end flag to string
 	p := strconv.Itoa(portnum)
 	port := ":" + p
+
+	// Array that holds the backend TCP ports
+	backendNodes := strings.Split(backendtcp, ",")
+
+	// Slice that holds the resolved backend TCP addresses
+	var backendAddrs []*net.TCPAddr
+	for _, v := range backendNodes {
+		temp, _ := net.ResolveTCPAddr("tcp", v)
+		backendAddrs = append(backendAddrs, temp)
+	}
 
 	// Listens on this port
 	ln, err := net.Listen("tcp", port)
@@ -144,7 +183,7 @@ func main() {
 			fmt.Println("Error accepting connection")
 		}
 		fmt.Printf("Connection accepted on port %s.\n", port)
-		go connHandler(conn)
+		go connHandler(conn, backendAddrs)
 	}
 	//defer conn.Close()
 }

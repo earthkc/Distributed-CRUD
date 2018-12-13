@@ -7,20 +7,34 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/rand"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var backendConns []*net.TCPConn
 var backendConnMutex sync.RWMutex
+
+var term int
 
 // Global Slice that Holds the strings of quotes
 var quotes = []string{}
 
 // Read/Write Mutex
 var mutex sync.RWMutex
+
+var currentLeader *net.TCPConn
+
+// Message comment
+type Message struct {
+	termNum int
+}
+
+var voteSuccessful chan bool
+var resetTimeout chan bool
 
 // Adds a new user inputted quote into the global slice
 func createQuote(a string) {
@@ -59,7 +73,7 @@ func updateQuote(id string, newQuote string) {
 	mutex.Unlock()
 }
 
-// Handles each TCP connection
+// Handles each TCP connection from frontends
 func connHandler(conn net.Conn, backendAddrs []*net.TCPAddr) {
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
@@ -96,13 +110,68 @@ func connHandler(conn net.Conn, backendAddrs []*net.TCPAddr) {
 			decoder.Decode(&id)
 			decoder.Decode(&newQuote)
 			updateQuote(id, newQuote)
-
 		}
 	}
 }
 
+// goroutine that handles messages from each backend server
+func backendConnHandler(conn *net.TCPConn, LeaderChan chan *net.TCPConn) {
+	encoder := json.NewEncoder(conn)
+	decoder := json.NewDecoder(conn)
+
+	//voted := false
+	//var elecTerm int
+
+	// map that uses the term number as the key with the value as the candidate voted
+	termVoted := make(map[int]*net.TCPConn)
+
+	for {
+		var backendAction string
+		decoder.Decode(&backendAction)
+		switch backendAction {
+		case "LEADER_HEARTBEAT":
+			var heartbeatTerm int
+			decoder.Decode(&heartbeatTerm)
+			if heartbeatTerm >= term {
+				LeaderChan <- conn
+			} // else tell this node they have been usurped
+		case "VOTE_REQUEST":
+			var elecTerm int
+			decoder.Decode(&elecTerm)
+			//if elecTerm > term {
+			_, ok := termVoted[elecTerm]
+			if ok == false {
+				termVoted[elecTerm] = conn
+				encoder.Encode("VOTE_SUCCESS")
+				encoder.Encode(Message{termNum: term})
+			}
+			//}
+		case "VOTE_SUCCESS":
+			resetTimeout <- true
+			var messageTerm Message
+			decoder.Decode(&messageTerm)
+			if messageTerm.termNum > term {
+				voteSuccessful <- true
+			} else {
+				voteSuccessful <- false
+			}
+		case "I_AM_LEADER":
+			var x int
+			decoder.Decode(&x)
+			term = x
+			LeaderChan <- conn
+		}
+
+	}
+}
+
+// Generates random timeout between 150 ms and 300 ms
+func timeoutGenerator() time.Duration {
+	return time.Duration(rand.Intn(151)+150) * time.Millisecond
+}
+
 // Synconization of backends using the Raft concensus algorithm
-func raftConsensus() {
+func raftConsensus(LeaderChan chan *net.TCPConn) {
 	type State int
 	const (
 		Follower  State = 0
@@ -110,27 +179,102 @@ func raftConsensus() {
 		Leader    State = 2
 	)
 	// log
-	term := 0
-	votes := 0
-	var currentLeader *net.TCPConn
+	term = 0   // put in for loop
+	votes := 0 // put in for loop
+
+	backendConnMutex.RLock()
 	quorum := len(backendConns) + 1
+	backendConnMutex.RUnlock()
 	currentState := Follower
+
+	// Generates random timeout between 150 ms and 300 ms
+	rand.Seed(time.Now().UnixNano())
+	electionTimeout := timeoutGenerator()
+
+	// If the current node is not leader
+	// for loop?
+	for {
+		if currentState == Leader {
+			backendConnMutex.RLock()
+			for _, v := range backendConns {
+				encoder := json.NewEncoder(v)
+				encoder.Encode("LEADER_HEARTBEAT")
+				encoder.Encode(term)
+			}
+			backendConnMutex.RUnlock()
+
+		} else {
+
+			select {
+			case currentLeader = <-LeaderChan:
+				// There is leader
+			case <-resetTimeout:
+				electionTimeout = timeoutGenerator()
+			case <-time.After(electionTimeout):
+				// No leader detected. Start election
+				currentState = Candidate
+				term++
+				votes = 1
+				electionTimeout = timeoutGenerator()
+				backendConnMutex.RLock()
+				for _, v := range backendConns {
+					// Sends a vote request along with the term number to all replica nodes
+					encoder := json.NewEncoder(v)
+					encoder.Encode("VOTE_REQUEST")
+					encoder.Encode(term)
+				}
+				backendConnMutex.RUnlock()
+
+				// Waiting for votes to come in
+				for {
+					select {
+					case validVote := <-voteSuccessful:
+						if validVote == true {
+							votes++
+							if votes >= quorum {
+								currentState = Leader
+								backendConnMutex.RLock()
+								for _, v := range backendConns {
+									encoder := json.NewEncoder(v)
+									encoder.Encode("I_AM_LEADER")
+									encoder.Encode(term)
+								}
+								backendConnMutex.RUnlock()
+								break
+							}
+						} else {
+							currentState = Follower
+							break
+						}
+					case <-time.After(electionTimeout):
+						currentState = Follower
+						break
+					}
+				}
+
+			}
+		}
+	}
 
 }
 
 // Initial connections to start synchronization between all backends
 func initConnectToBackends(backendAddrs []*net.TCPAddr) {
+	// channel for detecting heartbeats from leader
+	LeaderChan := make(chan *net.TCPConn)
+
 	for _, v := range backendAddrs {
 		conn, err := net.DialTCP("tcp", nil, v)
 		if err != nil {
 			fmt.Println("A backend server could not be connected to.")
 			//return
 		}
+		go backendConnHandler(conn, LeaderChan)
 		backendConnMutex.Lock()
 		backendConns = append(backendConns, conn)
 		backendConnMutex.Unlock()
 	}
-	go raftConsensus()
+	go raftConsensus(LeaderChan)
 	return
 }
 
